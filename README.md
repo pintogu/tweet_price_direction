@@ -52,11 +52,11 @@ tweet-price-direction/
 │  ├─ figures/              # confusion matrices + ROC curves + comparison plots
 │  └─ eda/                  # simple EDA plots + summary tables
 ├─ Models/
-│  ├─ log_reg.py         # logistic regression baseline
+│  ├─ Log_Reg.py         # logistic regression baseline
 │  ├─ MLP.py             # MLP with ticker embedding
 │  └─ CNN.py             # CNN sequence model with ticker embedding
 │  ├─ LSTM.py            # LSTM sequence model with ticker embedding
-│  └─ Models_comparison.ipynb  # loads predictions and compares models
+│  └─ Model_comparison.ipynb  # loads predictions and compares models
 ├─ preprocessing.py         # common pipeline: load -> features -> splits -> sequences
 
 ```
@@ -66,118 +66,75 @@ tweet-price-direction/
 
 Everything starts from the same preprocessing, so all models stay comparable.
 
-### Step 1 — Load and merge
+We start with two Excel files (stocks + bitcoin) with `Date`, `ticker`, `closing price`, and `tweet`. We merge them, clean column names/types, and create a stable `ticker_id` for each asset. Then we lightly clean the tweet text (lowercase, remove URLs/@mentions/$tickers) and compute a sentiment score per tweet with VADER. After that, we aggregate everything to one daily row per `(date, ticker_id)`, keeping the daily close plus tweet features like `n_tweets`, `sent_mean`, and `sent_std`.
 
-* We load the two Excel files (stocks + bitcoin).
-* We standardise column names, parse `date`, and make sure `close` is numeric.
-* We create a stable `ticker_id` (0…K-1) so the models can learn differences across assets.
-
-### Step 2 — Light NLP cleaning + sentiment
-
-Before sentiment, we do light cleaning to reduce noise: lowercase, remove URLs, @mentions, and `$TICKER`, and keep hashtag words without `#`.
-Then we compute sentiment per tweet using **VADER**.
-
-Outputs:
-
-* `outputs/eda/tweet_sentiment_hist.png`
-* `outputs/eda/tweets_per_day_hist.png`
-
-### Step 3 — Aggregate to daily level
-
-Models work at the daily level, so we convert tweet-level data into one row per `(date, ticker_id)` with:
-
-* `close` (daily close)
-* `n_tweets` (tweet count)
-* `sent_mean`, `sent_std` (daily sentiment stats)
-
-Outputs:
-
-* `data/processed/daily.csv`
-* `outputs/eda/coverage_by_ticker.csv`
-* `outputs/eda/daily_sent_mean_hist.png`
-
-### Step 4 — Create the target (H-day horizon)
-
-We define the label with a fixed horizon `H` (e.g., 3 days):
-
-* `close_fwd = close(t+H)`
-* `y = 1 if close_fwd > close(t), else 0`
-
-We also add safe lag features (no leakage): returns + lagged sentiment/volume.
-
-Outputs:
-
-* class balance plots in `outputs/eda/`
-
-### Step 5 — Time split + scaling
-
-We split by date into train/val/test (70/15/15).
-Then we standardise numeric features using **train only** statistics to avoid using future information.
-
-### Step 6 — Save model-ready files
-
-For daily models (LogReg/MLP):
-
-* `data/processed/train_daily_H{H}.csv`, `val_daily_H{H}.csv`, `test_daily_H{H}.csv`
-
-For sequence models (CNN/LSTM), we build lookback windows `LOOKBACK` (e.g., 14 days):
-
-* CNN input: `(N, C, L)`
-* LSTM input: `(N, L, C)`
-
-Saved as:
-
-* `data/processed/cnn_sequences_H{H}_L{LOOKBACK}.npz` + meta CSVs
-* `data/processed/lstm_sequences_H{H}_L{LOOKBACK}.npz` + meta CSVs
+From the daily table, we create the target with a fixed horizon `H` (e.g., 3 days): we shift the close to get `close_fwd = close(t+H)` and label `y=1` if `close_fwd > close(t)` else `0`. We also add “safe” lag features (returns + lagged sentiment/volume), then split by time into train/val/test and scale numeric features using train-only stats. Finally, we save daily CSV splits for LogReg/MLP and sequence arrays (lookback windows) for CNN/LSTM.
 
 ---
 
 ## 5) Models implemented
 
-### A) Logistic Regression (baseline) — `run_logreg.py`
+### A) Logistic Regression (baseline) — `Log_Reg.py`
 
-* We use scaled numeric features + one-hot `ticker_id`.
-* We try a small grid search on `C` and pick the best one on validation.
+For logistic regression we use **daily aggregated + scaled** numeric features:
 
-Outputs:
+* `sent_mean`, `sent_std`, `n_tweets`
+* `sent_mean_lag1`, `sent_std_lag1`, `n_tweets_lag1`
+* `ret`, `ret_lag1`
 
-* `outputs/predictions/logreg_predictions_H{H}.csv`
-* `outputs/figures/logreg_confusion_H{H}.png`
-* `outputs/figures/logreg_roc_H{H}.png`
+On top of that, we add the asset identity via **one-hot `ticker_id`** (so the model can learn different baselines per ticker). Then we train logistic regression and tune the regularisation strength (`C`) on the validation set (small grid, pick the best).
 
-### B) MLP (daily + ticker embedding) — `run_mlp.py`
+**What comes out:**
 
-* Same daily features, but `ticker_id` becomes a **learned embedding** so one model can work across all assets.
+* predictions CSV: `outputs/predictions/logreg_predictions_H{H}.csv`
 
-Outputs:
+### B) MLP— `MLP.py`
 
-* `outputs/predictions/mlp_predictions_H{H}.csv`
-* `outputs/figures/mlp_confusion_H{H}.png`
-* `outputs/figures/mlp_roc_H{H}.png`
+For the MLP we use the **same daily aggregated + scaled** numeric features as logistic regression:
 
-### C) CNN (sequence + ticker embedding) — `run_cnn.py`
+* `sent_mean`, `sent_std`, `n_tweets`
+* `sent_mean_lag1`, `sent_std_lag1`, `n_tweets_lag1`
+* `ret`, `ret_lag1`
 
-* We use `LOOKBACK` days of features and Conv1D over time to capture short-term patterns.
+The only difference is how we include the asset identity: instead of one-hot `ticker_id`, we learn a small **ticker embedding** vector for each `ticker_id`. We concatenate that embedding to the numeric features and pass everything through a small MLP to output the probability of **up vs down**.
 
-Outputs:
+**What comes out:**
 
-* `outputs/predictions/cnn_predictions_H{H}_L{LOOKBACK}.csv`
-* `outputs/figures/cnn_confusion_H{H}_L{LOOKBACK}.png`
-* `outputs/figures/cnn_roc_H{H}_L{LOOKBACK}.png`
+* predictions CSV: `outputs/predictions/mlp_predictions_H{H}.csv`
 
-### D) LSTM (sequence + ticker embedding) — `run_lstm.py`
 
-* We use the same lookback window, but an LSTM to capture longer temporal dependencies.
+### C) CNN  — `CNN.py`
 
-Outputs:
+For the CNN we use the same daily feature set as before, but instead of feeding just “today”, we build a sequence of the last `LOOKBACK` days. Each training example is a tensor **X of shape `(C, L)`**, where:
 
-* `outputs/predictions/lstm_predictions_H{H}_L{LOOKBACK}.csv`
-* `outputs/figures/lstm_confusion_H{H}_L{LOOKBACK}.png`
-* `outputs/figures/lstm_roc_H{H}_L{LOOKBACK}.png`
+* `L = LOOKBACK` (e.g., 14 days)
+* `C` are the daily features (same ones as LogReg/MLP):
+  `sent_mean`, `sent_std`, `n_tweets`, `sent_mean_lag1`, `sent_std_lag1`, `n_tweets_lag1`, `ret`, `ret_lag1`
+
+We apply **Conv1D over time** to detect short-term patterns across the window (like momentum/spikes), then we concatenate the **ticker embedding** (one learned vector per `ticker_id`) before the final classification head.
+
+**What comes out:**
+
+* predictions CSV: `outputs/predictions/cnn_predictions_H{H}_L{LOOKBACK}.csv`
+
+
+### D) LSTM — `LSTM.py`
+
+For the LSTM we also use a `LOOKBACK`-day sequence, but we feed it to an **LSTM** instead of convolutions. Each training example is a tensor **X of shape `(L, C)`**, where:
+
+* `L = LOOKBACK` (e.g., 14 days)
+* `C` are the same daily features as the other models:
+  `sent_mean`, `sent_std`, `n_tweets`, `sent_mean_lag1`, `sent_std_lag1`, `n_tweets_lag1`, `ret`, `ret_lag1`
+
+The LSTM reads the sequence day-by-day and produces a final hidden state that represents the full window. Then we concatenate the **ticker embedding** (one learned vector per `ticker_id`) and use a small classifier head to output the probability of **up vs down**.
+
+**What comes out:**
+
+* predictions CSV: `outputs/predictions/lstm_predictions_H{H}_L{LOOKBACK}.csv`
 
 ---
 
-## 6) Final comparison — `05_compare_models.ipynb`
+## 6) Final comparison — `Model_comparison.ipynb`
 
 We load the prediction CSVs from all models and:
 
@@ -186,13 +143,6 @@ We load the prediction CSVs from all models and:
 3. recompute metrics on the **common rows** for a fair comparison
 4. compute per-ticker accuracy
 5. save tables + plots to `outputs/`
-
-Saved outputs:
-
-* `outputs/metrics_common.csv`
-* `outputs/per_ticker_accuracy_common.csv`
-* `outputs/figures/compare_accuracy_common_H{H}.png`
-* `outputs/figures/compare_auc_common_H{H}.png`
 
 ---
 
@@ -220,12 +170,12 @@ python preprocessing.py
 Train models:
 
 ```bash
-python run_logreg.py
-python run_mlp.py
-python run_cnn.py
-python run_lstm.py
+python Log_Reg.py
+python MLP.py
+python CNN.py
+python LSTM.py
 ```
 
 Compare:
 
-* Open and run `Models_comparison.ipynb`
+* Open and run `Model_comparison.ipynb`
